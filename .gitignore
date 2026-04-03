@@ -1,0 +1,7 @@
+kai
+*.db
+*.db-wal
+*.db-shm
+daemon.pid
+.env
+dist/
