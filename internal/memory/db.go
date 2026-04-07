@@ -369,7 +369,31 @@ func (d *DB) SetPref(key, value string) error {
 	})
 }
 
-// --- Token budget ---
+// SearchSummaries performs FTS5 full-text search over run summaries.
+// Returns up to limit matching runs ordered by relevance.
+func (d *DB) SearchSummaries(query string, limit int) ([]*Run, error) {
+	rows, err := d.readDB.Query(`
+		SELECT r.run_rowid, r.id, r.job, r.ts, r.status, r.summary, r.tokens_used, r.active_days, r.briefing_opened
+		FROM runs_fts
+		JOIN runs r ON runs_fts.rowid = r.run_rowid
+		WHERE runs_fts MATCH ?
+		ORDER BY rank
+		LIMIT ?`, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var runs []*Run
+	for rows.Next() {
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, r)
+	}
+	return runs, rows.Err()
+}
+
 
 // TokensUsedToday returns total tokens_used from completed runs today (local time).
 func (d *DB) TokensUsedToday() (int64, error) {

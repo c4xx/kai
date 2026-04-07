@@ -186,6 +186,27 @@ func (g *Gate) Reject(id string) error {
 	return os.WriteFile(g.rejectPath(id), []byte{}, 0600)
 }
 
+// ExpireStale removes pending actions older than maxAge and returns their IDs.
+// Callers should log these IDs as auto-expired in the audit log.
+func (g *Gate) ExpireStale(maxAge time.Duration) ([]string, error) {
+	ids, err := g.ListPending()
+	if err != nil {
+		return nil, err
+	}
+	var expired []string
+	for _, id := range ids {
+		a, err := g.ReadPending(id)
+		if err != nil {
+			continue
+		}
+		if time.Since(a.CreatedAt) > maxAge {
+			g.RemovePending(id)
+			expired = append(expired, id)
+		}
+	}
+	return expired, nil
+}
+
 func formatAge(d time.Duration) string {
 	h := int(d.Hours())
 	m := int(d.Minutes()) % 60
