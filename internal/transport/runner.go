@@ -34,18 +34,21 @@ type AgentRunner interface {
 
 // betaRunner implements AgentRunner using the Anthropic SDK.
 type betaRunner struct {
-	client    anthropic.Client
-	model     anthropic.Model
-	maxTokens int64
+	client      anthropic.Client
+	model       anthropic.Model
+	maxTokens   int64
+	tokenBudget int64 // max tokens for the whole run (0 = unlimited)
 }
 
 // NewBetaRunner creates an AgentRunner backed by the Anthropic API.
-func NewBetaRunner(apiKey string, model anthropic.Model, maxTokens int64) AgentRunner {
+// tokenBudget is the maximum total tokens for the run (0 = unlimited).
+func NewBetaRunner(apiKey string, model anthropic.Model, maxTokens, tokenBudget int64) AgentRunner {
 	client := anthropic.NewClient(option.WithAPIKey(apiKey))
 	return &betaRunner{
-		client:    client,
-		model:     model,
-		maxTokens: maxTokens,
+		client:      client,
+		model:       model,
+		maxTokens:   maxTokens,
+		tokenBudget: tokenBudget,
 	}
 }
 
@@ -69,6 +72,11 @@ func (r *betaRunner) RunToCompletion(ctx context.Context, systemPrompt string, t
 	var finalText string
 
 	for {
+		if r.tokenBudget > 0 && totalTokens >= r.tokenBudget {
+			return &RunResult{FinalText: finalText, TokensUsed: totalTokens},
+				fmt.Errorf("token budget exhausted (%d/%d used)", totalTokens, r.tokenBudget)
+		}
+
 		params := anthropic.BetaMessageNewParams{
 			Model:     r.model,
 			MaxTokens: r.maxTokens,
