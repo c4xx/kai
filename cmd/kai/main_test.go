@@ -83,3 +83,70 @@ func TestBlastRadiusColor(t *testing.T) {
 		}
 	}
 }
+
+func TestParseStandupLine(t *testing.T) {
+	tests := []struct {
+		line      string
+		wantField string
+		wantValue string
+		wantOK    bool
+	}{
+		{"done: finished login page", "done", "finished login page", true},
+		{"Done: finished login page", "done", "finished login page", true},
+		{"昨日: completed auth", "done", "completed auth", true},
+		{"today: starting auth module", "today", "starting auth module", true},
+		{"Today: something", "today", "something", true},
+		{"今日: working on tests", "today", "working on tests", true},
+		{"blocked: waiting for API docs", "blocked", "waiting for API docs", true},
+		{"Blocked: nothing", "blocked", "nothing", true},
+		{"卡点: api not ready", "blocked", "api not ready", true},
+		{"unrecognized line", "", "", false},
+		{"random text here", "", "", false},
+		{"", "", "", false},
+	}
+	for _, tc := range tests {
+		field, value, ok := parseStandupLine(tc.line)
+		if ok != tc.wantOK {
+			t.Errorf("parseStandupLine(%q): ok=%v, want %v", tc.line, ok, tc.wantOK)
+			continue
+		}
+		if ok {
+			if field != tc.wantField {
+				t.Errorf("parseStandupLine(%q): field=%q, want %q", tc.line, field, tc.wantField)
+			}
+			if value != tc.wantValue {
+				t.Errorf("parseStandupLine(%q): value=%q, want %q", tc.line, value, tc.wantValue)
+			}
+		}
+	}
+}
+
+func TestValidateStandupDate(t *testing.T) {
+	today := time.Now().Format("2006-01-02")
+	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+	tomorrow := time.Now().AddDate(0, 0, 1).Format("2006-01-02")
+
+	// Empty → today.
+	got, err := validateStandupDate("")
+	if err != nil || got != today {
+		t.Errorf("validateStandupDate(''): got=%q err=%v, want=%q", got, err, today)
+	}
+
+	// Valid past date.
+	got, err = validateStandupDate(yesterday)
+	if err != nil || got != yesterday {
+		t.Errorf("validateStandupDate(%q): got=%q err=%v", yesterday, got, err)
+	}
+
+	// Future date: must error.
+	_, err = validateStandupDate(tomorrow)
+	if err == nil {
+		t.Errorf("validateStandupDate(%q): expected error for future date", tomorrow)
+	}
+
+	// Invalid format.
+	_, err = validateStandupDate("07-04-2026")
+	if err == nil {
+		t.Error("expected error for invalid date format")
+	}
+}
