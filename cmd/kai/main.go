@@ -5,8 +5,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,6 +20,7 @@ import (
 	"github.com/c4xx/kai/internal/memory"
 	"github.com/c4xx/kai/internal/safety"
 	"github.com/c4xx/kai/internal/scheduler"
+	"github.com/robfig/cron/v3"
 )
 
 func main() {
@@ -52,8 +55,10 @@ func main() {
 		runPending()
 	case "why":
 		runWhy(args)
+	case "replay":
+		runReplay(args)
 	case "version":
-		fmt.Println("kai v0.1.0")
+		fmt.Println("kai v0.2.0")
 	default:
 		fmt.Fprintf(os.Stderr, "kai: unknown command: %s\n", cmd)
 		printUsage()
@@ -78,6 +83,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  confirm <id> [--force]  Confirm a pending action")
 	fmt.Fprintln(os.Stderr, "  reject <id>  Reject a pending action")
 	fmt.Fprintln(os.Stderr, "  why <run-id> Show all actions for a run")
+	fmt.Fprintln(os.Stderr, "  replay <run-id>  Read-only simulation of a prior run")
 }
 
 // mustLoadConfig loads config and exits on error.
@@ -227,9 +233,100 @@ data_dir = ""
 }
 
 func runInstall() {
-	fmt.Println("kai install — installing launchd service (macOS)")
-	// TODO: Week 3 — generate plist and install to ~/Library/LaunchAgents/
-	fmt.Println("Note: launchd integration coming in Week 3. For now, run `kai daemon` manually.")
+	cfg := mustLoadConfig()
+	exe, err := os.Executable()
+	if err != nil {
+		die("resolving executable path: %v", err)
+	}
+
+	switch runtime.GOOS {
+	case "darwin":
+		installLaunchd(cfg, exe)
+	case "linux":
+		installSystemd(cfg, exe)
+	default:
+		fmt.Fprintln(os.Stderr, "kai install: unsupported OS (macOS and Linux only)")
+		os.Exit(1)
+	}
+}
+
+func installLaunchd(cfg *config.Config, exe string) {
+	label := "com.kai.daemon"
+	plistPath := filepath.Join(os.Getenv("HOME"), "Library", "LaunchAgents", label+".plist")
+
+	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>%s</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>%s</string>
+		<string>daemon</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>%s/kai.log</string>
+	<key>StandardErrorPath</key>
+	<string>%s/kai.log</string>
+</dict>
+</plist>
+`, label, exe, cfg.DataDir, cfg.DataDir)
+
+	launchAgentsDir := filepath.Join(os.Getenv("HOME"), "Library", "LaunchAgents")
+	if err := os.MkdirAll(launchAgentsDir, 0755); err != nil {
+		die("creating LaunchAgents dir: %v", err)
+	}
+	if err := os.WriteFile(plistPath, []byte(plist), 0644); err != nil {
+		die("writing plist: %v", err)
+	}
+	fmt.Printf("Wrote %s\n", plistPath)
+
+	if err := exec.Command("launchctl", "load", plistPath).Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: launchctl load failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Run manually: launchctl load %s\n", plistPath)
+		return
+	}
+	fmt.Println("kai daemon installed and started. It will run on login.")
+}
+
+func installSystemd(cfg *config.Config, exe string) {
+	home := os.Getenv("HOME")
+	unitDir := filepath.Join(home, ".config", "systemd", "user")
+	unitPath := filepath.Join(unitDir, "kai.service")
+
+	unit := fmt.Sprintf(`[Unit]
+Description=kai developer companion daemon
+After=network.target
+
+[Service]
+ExecStart=%s daemon
+Restart=on-failure
+StandardOutput=append:%s/kai.log
+StandardError=append:%s/kai.log
+
+[Install]
+WantedBy=default.target
+`, exe, cfg.DataDir, cfg.DataDir)
+
+	if err := os.MkdirAll(unitDir, 0755); err != nil {
+		die("creating systemd user dir: %v", err)
+	}
+	if err := os.WriteFile(unitPath, []byte(unit), 0644); err != nil {
+		die("writing unit file: %v", err)
+	}
+	fmt.Printf("Wrote %s\n", unitPath)
+
+	if err := exec.Command("systemctl", "--user", "enable", "--now", "kai").Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: systemctl enable failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Run manually: systemctl --user enable --now kai\n")
+		return
+	}
+	fmt.Println("kai daemon enabled and started. It will run on login.")
 }
 
 func runJob(args []string) {
@@ -323,6 +420,13 @@ func runStatus() {
 		} else {
 			fmt.Printf("daemon: running (pid %d)\n", pid)
 		}
+	}
+
+	// Next scheduled run
+	sched, err := cron.ParseStandard(cfg.Schedule)
+	if err == nil {
+		next := sched.Next(time.Now())
+		fmt.Printf("next run: %s\n", next.Format("2006-01-02 15:04:05"))
 	}
 
 	// Token budget
@@ -614,4 +718,25 @@ func blastRadiusColor(br string) string {
 	default:
 		return ""
 	}
+}
+
+func runReplay(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: kai replay <run-id>")
+		os.Exit(1)
+	}
+	runID := args[0]
+
+	cfg := mustLoadConfig()
+	db := mustOpenDB(cfg)
+	defer db.Close()
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	result, err := core.Replay(ctx, cfg, db, runID)
+	if err != nil {
+		die("replay failed: %v", err)
+	}
+	fmt.Println(result)
 }
