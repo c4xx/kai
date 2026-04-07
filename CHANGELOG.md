@@ -2,6 +2,25 @@
 
 All notable changes to kai are documented here.
 
+## [0.3.0] - 2026-04-07
+
+### Added
+
+- **Team standup management** (`cmd/kai/main.go`): `kai standup submit --member <name>` records daily standup entries (done/today/blocked fields) in Chinese or English format; `kai standup parse --file <path> [--date <date>]` batch-imports from a text file; `kai standup serve [--port N]` starts a local HTTP server on `127.0.0.1` for teammates to POST standups
+- **Standup database schema** (`memory/db.go`): new `standups` table with `UNIQUE(member, date)` constraint and `ON CONFLICT REPLACE` upsert semantics; `InsertStandup`, `StandupsForDate`, and `MemberStandupHistory` methods use the write-serializer goroutine
+- **Team standup briefing context** (`core/runner.go`): `buildStandupContext` injects today's standup data into the morning briefing system prompt with blocked (🔴), in-progress (🟡), and missing (📭) indicators including multi-day streak counts
+- **Cross-day comparison** (`core/runner.go`): `crossDayMatch` verifies that yesterday's planned tasks appear in today's completed work (requires 2+ non-trivial words of length ≥ 4, case-insensitive)
+- **Prompt injection defense** (`core/runner.go`): `sanitize` strips `</external_content>` close tags from all standup field values before injecting into prompts
+- **Standup reminder cron** (`scheduler/daemon.go`): `standupReminderCron` converts `HH:MM` config to a weekday-only cron expression; `sendStandupReminders` notifies members who have not submitted by reminder time
+- **Team configuration** (`config/config.go`): `TeamConfig` struct with `members`, `standup_reminder`, `stale_threshold_days`, `serve_port`, and `standup_history_days` fields; all fields have safe defaults applied in `applyDefaults`
+- **Graceful HTTP shutdown** (`cmd/kai/main.go`): `kai standup serve` uses `http.Server` with a context-driven shutdown goroutine; binds to `127.0.0.1` only; handles EADDRINUSE portably via `strings.Contains`
+
+### Tests
+
+- `internal/memory/db_test.go`: `TestInsertStandup_HappyPath`, `TestInsertStandup_Upsert`, `TestStandupsForDate_Empty`, `TestMemberStandupHistory_CrossDay`, `TestMemberStandupHistory_Empty`
+- `internal/core/runner_test.go`: `TestCrossDayMatch` (6 subtests), `TestSanitize`, `TestBuildStandupContext_WithData`, `TestBuildStandupContext_EmptyMembers`, `TestBuildStandupContext_SanitizesInjection`
+- `cmd/kai/main_test.go`: `TestParseStandupLine` (12 cases), `TestValidateStandupDate`
+
 ## [0.2.0] - 2026-04-07
 
 ### Features
