@@ -21,6 +21,7 @@ type Config struct {
 	Trust  TrustConfig  `toml:"trust"`
 	Limits LimitsConfig `toml:"limits"`
 	Paths  PathsConfig  `toml:"paths"`
+	Team   TeamConfig   `toml:"team"`
 
 	// Resolved at load time — not from TOML.
 	DataDir   string `toml:"-"`
@@ -45,6 +46,15 @@ type PathsConfig struct {
 	DataDir string `toml:"data_dir"`
 }
 
+// TeamConfig controls team standup collection and briefing.
+type TeamConfig struct {
+	Members            []string `toml:"members"`             // authoritative "expected" set
+	StandupReminder    string   `toml:"standup_reminder"`    // HH:MM, fires if not submitted on weekdays
+	StaleThresholdDays int      `toml:"stale_threshold_days"` // default 2
+	ServePort          int      `toml:"serve_port"`          // default 8080
+	StandupHistoryDays int      `toml:"standup_history_days"` // default 1 (today only in prompt)
+}
+
 // defaults applied when fields are empty.
 func applyDefaults(c *Config) {
 	if c.Schedule == "" {
@@ -64,6 +74,15 @@ func applyDefaults(c *Config) {
 	}
 	if c.Limits.GitHubRequestsPerHour == 0 {
 		c.Limits.GitHubRequestsPerHour = 60
+	}
+	if c.Team.StaleThresholdDays == 0 {
+		c.Team.StaleThresholdDays = 2
+	}
+	if c.Team.ServePort == 0 {
+		c.Team.ServePort = 8080
+	}
+	if c.Team.StandupHistoryDays == 0 {
+		c.Team.StandupHistoryDays = 1
 	}
 }
 
