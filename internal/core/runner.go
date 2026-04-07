@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -112,6 +113,9 @@ func executeRun(ctx context.Context, cfg *config.Config, db *memory.DB, runID, j
 
 	// Build context injection (last 7 summaries).
 	contextBlock := buildMemoryContext(db, cfg.WatchRepos)
+	if len(cfg.Team.Members) > 0 {
+		contextBlock += buildStandupContext(db, cfg.Team.Members, cfg.Team.StandupHistoryDays)
+	}
 
 	systemPrompt := fmt.Sprintf(systemPromptTemplate, contextBlock)
 
@@ -283,8 +287,140 @@ func buildMemoryContext(db *memory.DB, watchRepos []string) string {
 	return sb.String()
 }
 
+// buildStandupContext builds the team standup section appended to the memory context.
+// It queries today's standups, runs cross-day comparison, and formats a structured block.
+// All standup field values are sanitized to remove prompt injection vectors.
+func buildStandupContext(db *memory.DB, members []string, historyDays int) string {
+	if historyDays < 1 {
+		historyDays = 1
+	}
+	today := time.Now().Format("2006-01-02")
+	todayStandups, err := db.StandupsForDate(today)
+	if err != nil {
+		log.Printf("kai: buildStandupContext: querying today's standups: %v", err)
+		return ""
+	}
+
+	// Index today's standups by member.
+	todayByMember := make(map[string]*memory.Standup, len(todayStandups))
+	for _, s := range todayStandups {
+		todayByMember[s.Member] = s
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("\n## Team Standup %s\n", today))
+
+	// Blocked members (today's blocked field non-empty).
+	for _, m := range members {
+		s, ok := todayByMember[m]
+		if !ok || sanitize(s.Blocked) == "" {
+			continue
+		}
+		// Check how many consecutive days blocked.
+		hist, _ := db.MemberStandupHistory(m, 7)
+		blockedDays := 0
+		for _, h := range hist {
+			if sanitize(h.Blocked) != "" {
+				blockedDays++
+			} else {
+				break
+			}
+		}
+		daysLabel := ""
+		if blockedDays > 1 {
+			daysLabel = fmt.Sprintf(" (%d days)", blockedDays)
+		}
+		sb.WriteString(fmt.Sprintf("🔴 Blocked: %s%s — %s\n", m, daysLabel, sanitize(s.Blocked)))
+	}
+
+	// In-progress members (submitted, not blocked).
+	for _, m := range members {
+		s, ok := todayByMember[m]
+		if !ok || sanitize(s.Blocked) != "" {
+			continue
+		}
+		// Cross-day comparison: did yesterday's "today" appear in today's "done"?
+		confirmLabel := ""
+		hist, _ := db.MemberStandupHistory(m, 2)
+		if len(hist) >= 2 {
+			// hist[0] = today, hist[1] = yesterday (ORDER BY date DESC)
+			yest := hist[1]
+			if crossDayMatch(sanitize(yest.Today), sanitize(s.Done)) {
+				confirmLabel = " (yesterday: ✓ confirmed)"
+			} else if sanitize(yest.Today) != "" {
+				log.Printf("kai: cross-day mismatch for %s: yesterday planned %q not found in today done %q", m, yest.Today, s.Done)
+			}
+		}
+		task := sanitize(s.Today)
+		if task == "" {
+			task = sanitize(s.Done)
+		}
+		sb.WriteString(fmt.Sprintf("🟡 In progress: %s — %s%s\n", m, task, confirmLabel))
+	}
+
+	// Missing standups.
+	for _, m := range members {
+		if _, ok := todayByMember[m]; !ok {
+			// Count consecutive missing days.
+			hist, _ := db.MemberStandupHistory(m, 7)
+			missingDays := 0
+			checkDate := time.Now()
+			for i := 0; i < 7; i++ {
+				d := checkDate.AddDate(0, 0, -i).Format("2006-01-02")
+				found := false
+				for _, h := range hist {
+					if h.Date == d {
+						found = true
+						break
+					}
+				}
+				if !found {
+					missingDays++
+				} else {
+					break
+				}
+			}
+			daysLabel := ""
+			if missingDays > 1 {
+				daysLabel = fmt.Sprintf(" (%d days missing)", missingDays)
+			}
+			sb.WriteString(fmt.Sprintf("📭 No standup: %s%s\n", m, daysLabel))
+		}
+	}
+
+	return sb.String()
+}
+
+// sanitize strips the </external_content> close tag to prevent prompt injection.
+func sanitize(s string) string {
+	return strings.ReplaceAll(s, "</external_content>", "")
+}
+
+// crossDayMatch returns true if at least 2 non-trivial words (len >= 4) from
+// yesterday's "today" field appear in today's "done" field. Case-insensitive.
+func crossDayMatch(yesterdayToday, todayDone string) bool {
+	if len(yesterdayToday) == 0 || len(todayDone) == 0 {
+		return false
+	}
+	doneWords := make(map[string]bool)
+	for _, w := range strings.Fields(strings.ToLower(todayDone)) {
+		if len(w) >= 4 {
+			doneWords[w] = true
+		}
+	}
+	matches := 0
+	for _, w := range strings.Fields(strings.ToLower(yesterdayToday)) {
+		if len(w) >= 4 && doneWords[w] {
+			matches++
+			if matches >= 2 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // buildFTSQuery builds a simple OR query from repo names for FTS5 MATCH.
-// Each "owner/repo" contributes owner and repo as terms.
 func buildFTSQuery(watchRepos []string) string {
 	seen := make(map[string]bool)
 	var terms []string
