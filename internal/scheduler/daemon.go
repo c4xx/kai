@@ -11,6 +11,7 @@ import (
 	"github.com/c4xx/kai/internal/config"
 	"github.com/c4xx/kai/internal/core"
 	"github.com/c4xx/kai/internal/memory"
+	"github.com/c4xx/kai/internal/notify"
 	"github.com/c4xx/kai/internal/safety"
 	"github.com/google/go-github/v60/github"
 	"github.com/robfig/cron/v3"
@@ -49,6 +50,21 @@ func (d *Daemon) Start(ctx context.Context) error {
 	})
 	if err != nil {
 		return err
+	}
+
+	// Standup reminder cron: fire on weekdays at team.standup_reminder time.
+	if d.cfg.Team.StandupReminder != "" {
+		cronExpr, err := standupReminderCron(d.cfg.Team.StandupReminder)
+		if err != nil {
+			log.Printf("kai: invalid standup_reminder %q: %v (skipping)", d.cfg.Team.StandupReminder, err)
+		} else {
+			_, err = d.cron.AddFunc(cronExpr, func() {
+				d.sendStandupReminders(ctx)
+			})
+			if err != nil {
+				log.Printf("kai: failed to register standup reminder cron: %v", err)
+			}
+		}
 	}
 	d.cron.Start()
 	log.Printf("kai: daemon started, schedule: %s", d.cfg.Schedule)
@@ -187,5 +203,43 @@ func newGitHubClient(ctx context.Context, token string) *github.Client {
 	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
 	tc := oauth2.NewClient(ctx, ts)
 	return github.NewClient(tc)
+}
+
+// standupReminderCron converts "HH:MM" to a weekday-only cron expression "MM HH * * 1-5".
+func standupReminderCron(hhmm string) (string, error) {
+	parts := strings.SplitN(hhmm, ":", 2)
+	if len(parts) != 2 {
+		return "", fmt.Errorf("expected HH:MM format")
+	}
+	h, err1 := fmt.Sscanf(parts[0], "%d", new(int))
+	m, err2 := fmt.Sscanf(parts[1], "%d", new(int))
+	if h != 1 || m != 1 || err1 != nil || err2 != nil {
+		return "", fmt.Errorf("invalid HH:MM: %q", hhmm)
+	}
+	return fmt.Sprintf("%s %s * * 1-5", strings.TrimSpace(parts[1]), strings.TrimSpace(parts[0])), nil
+}
+
+// sendStandupReminders queries today's standups and notifies members who haven't submitted.
+func (d *Daemon) sendStandupReminders(ctx context.Context) {
+	if len(d.cfg.Team.Members) == 0 {
+		return
+	}
+	today := time.Now().Format("2006-01-02")
+	submitted, err := d.db.StandupsForDate(today)
+	if err != nil {
+		log.Printf("kai: standup reminder: querying standups: %v", err)
+		return
+	}
+	submittedSet := make(map[string]bool, len(submitted))
+	for _, s := range submitted {
+		submittedSet[s.Member] = true
+	}
+	for _, member := range d.cfg.Team.Members {
+		if !submittedSet[member] {
+			log.Printf("kai: standup reminder: %s has not submitted today", member)
+			notify.Send("kai: standup reminder",
+				fmt.Sprintf("%s has not submitted a standup today. Run `kai standup submit --member %s`", member, member))
+		}
+	}
 }
 
