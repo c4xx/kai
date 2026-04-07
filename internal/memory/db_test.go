@@ -209,3 +209,119 @@ func TestPreferences(t *testing.T) {
 		t.Errorf("expected light after upsert, got %s", val)
 	}
 }
+
+func TestInsertStandup_HappyPath(t *testing.T) {
+	db := openTestDB(t)
+
+	s := &Standup{
+		Member:  "alice",
+		Date:    "2026-04-07",
+		Done:    "finished login page",
+		Today:   "starting auth module",
+		Blocked: "",
+		TS:      1000,
+	}
+	if err := db.InsertStandup(s); err != nil {
+		t.Fatalf("InsertStandup: %v", err)
+	}
+
+	rows, err := db.StandupsForDate("2026-04-07")
+	if err != nil {
+		t.Fatalf("StandupsForDate: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 standup, got %d", len(rows))
+	}
+	if rows[0].Member != "alice" {
+		t.Errorf("expected alice, got %s", rows[0].Member)
+	}
+	if rows[0].Done != "finished login page" {
+		t.Errorf("unexpected Done: %s", rows[0].Done)
+	}
+}
+
+func TestInsertStandup_Upsert(t *testing.T) {
+	db := openTestDB(t)
+
+	s1 := &Standup{Member: "bob", Date: "2026-04-07", Done: "first write", Today: "plan A", TS: 1000}
+	if err := db.InsertStandup(s1); err != nil {
+		t.Fatalf("InsertStandup first: %v", err)
+	}
+
+	// Second write to same member+date — last-write-wins.
+	s2 := &Standup{Member: "bob", Date: "2026-04-07", Done: "second write", Today: "plan B", TS: 2000}
+	if err := db.InsertStandup(s2); err != nil {
+		t.Fatalf("InsertStandup second: %v", err)
+	}
+
+	rows, err := db.StandupsForDate("2026-04-07")
+	if err != nil {
+		t.Fatalf("StandupsForDate: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row after upsert, got %d", len(rows))
+	}
+	if rows[0].Done != "second write" {
+		t.Errorf("expected second write wins, got %s", rows[0].Done)
+	}
+}
+
+func TestStandupsForDate_Empty(t *testing.T) {
+	db := openTestDB(t)
+
+	rows, err := db.StandupsForDate("2026-04-01")
+	if err != nil {
+		t.Fatalf("StandupsForDate: %v", err)
+	}
+	// Must return empty slice, not nil.
+	if rows == nil {
+		t.Fatal("expected empty slice, got nil")
+	}
+	if len(rows) != 0 {
+		t.Fatalf("expected 0 rows, got %d", len(rows))
+	}
+}
+
+func TestMemberStandupHistory_CrossDay(t *testing.T) {
+	db := openTestDB(t)
+
+	// Insert two days for alice — most recent first after query.
+	s1 := &Standup{Member: "alice", Date: "2026-04-06", Done: "login page done", Today: "auth module", TS: 900}
+	s2 := &Standup{Member: "alice", Date: "2026-04-07", Done: "auth module done", Today: "permissions", TS: 1000}
+	if err := db.InsertStandup(s1); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.InsertStandup(s2); err != nil {
+		t.Fatal(err)
+	}
+
+	hist, err := db.MemberStandupHistory("alice", 2)
+	if err != nil {
+		t.Fatalf("MemberStandupHistory: %v", err)
+	}
+	if len(hist) != 2 {
+		t.Fatalf("expected 2 records, got %d", len(hist))
+	}
+	// ORDER BY date DESC — hist[0] should be the most recent.
+	if hist[0].Date != "2026-04-07" {
+		t.Errorf("expected hist[0] = 2026-04-07 (most recent), got %s", hist[0].Date)
+	}
+	if hist[1].Date != "2026-04-06" {
+		t.Errorf("expected hist[1] = 2026-04-06 (yesterday), got %s", hist[1].Date)
+	}
+}
+
+func TestMemberStandupHistory_Empty(t *testing.T) {
+	db := openTestDB(t)
+
+	hist, err := db.MemberStandupHistory("nobody", 5)
+	if err != nil {
+		t.Fatalf("MemberStandupHistory: %v", err)
+	}
+	if hist == nil {
+		t.Fatal("expected empty slice, got nil")
+	}
+	if len(hist) != 0 {
+		t.Fatalf("expected 0 records, got %d", len(hist))
+	}
+}
