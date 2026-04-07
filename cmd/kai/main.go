@@ -916,14 +916,22 @@ func runStandupServe(args []string) {
 		defer func() {
 			if rec := recover(); rec != nil {
 				log.Printf("kai standup serve: panic: %v", rec)
-				http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				fmt.Fprint(w, `{"error":"internal server error"}`)
 			}
 		}()
 		mux.ServeHTTP(w, r)
 	})
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	srv := &http.Server{Addr: addr, Handler: handler}
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -1032,7 +1040,8 @@ func validateStandupDate(s string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid date %q: must be YYYY-MM-DD", s)
 	}
-	today := time.Now().Truncate(24 * time.Hour)
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
 	if t.After(today) {
 		return "", fmt.Errorf("date %s is in the future", s)
 	}

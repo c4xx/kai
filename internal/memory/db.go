@@ -438,7 +438,7 @@ func (d *DB) InsertStandup(s *Standup) error {
 // Returns an empty slice (not nil) when no standups exist for the date.
 func (d *DB) StandupsForDate(date string) ([]*Standup, error) {
 	rows, err := d.readDB.Query(
-		`SELECT member, date, done, today, blocked, ts FROM standups WHERE date = ? ORDER BY member`,
+		`SELECT member, date, COALESCE(done,''), COALESCE(today,''), COALESCE(blocked,''), ts FROM standups WHERE date = ? ORDER BY member`,
 		date,
 	)
 	if err != nil {
@@ -459,7 +459,7 @@ func (d *DB) StandupsForDate(date string) ([]*Standup, error) {
 // MemberStandupHistory returns the last N days of standups for a member, most recent first.
 func (d *DB) MemberStandupHistory(member string, days int) ([]*Standup, error) {
 	rows, err := d.readDB.Query(
-		`SELECT member, date, done, today, blocked, ts FROM standups
+		`SELECT member, date, COALESCE(done,''), COALESCE(today,''), COALESCE(blocked,''), ts FROM standups
 		 WHERE member = ? ORDER BY date DESC LIMIT ?`,
 		member, days,
 	)

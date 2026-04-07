@@ -391,7 +391,11 @@ func buildStandupContext(db *memory.DB, members []string, historyDays int) strin
 	return sb.String()
 }
 
-// sanitize strips the </external_content> close tag to prevent prompt injection.
+// sanitize strips the </external_content> close tag from standup field values.
+// Standup submitters are trusted team members (CLI or loopback HTTP only).
+// This strip defends against a teammate pasting raw GitHub content (which uses
+// the external_content tag) verbatim into their standup fields, which would
+// confuse the LLM's trust boundary parsing.
 func sanitize(s string) string {
 	return strings.ReplaceAll(s, "</external_content>", "")
 }
@@ -594,5 +598,13 @@ func truncate(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
-	return s[:max]
+	// Walk runes to avoid splitting multi-byte UTF-8 characters.
+	n := 0
+	for i := range s {
+		if n >= max {
+			return s[:i]
+		}
+		n++
+	}
+	return s
 }

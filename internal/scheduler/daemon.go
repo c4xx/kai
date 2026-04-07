@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/c4xx/kai/internal/config"
@@ -104,6 +105,10 @@ func (d *Daemon) pollLoop(ctx context.Context) {
 
 	ghClient := newGitHubClient(ctx, d.cfg.GitHubToken)
 
+	// runInFlight ensures at most one poll-triggered core.Run at a time,
+	// preventing multiple active repos from racing and overshooting the daily token budget.
+	var runInFlight atomic.Bool
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -123,11 +128,16 @@ func (d *Daemon) pollLoop(ctx context.Context) {
 				if active {
 					states[i].nextPoll = now.Add(activePollInterval)
 					log.Printf("kai: %s is active, triggering github_summary", s.repo)
-					go func() {
-						if err := core.Run(ctx, d.cfg, d.db, "github_summary"); err != nil {
-							log.Printf("kai: poll-triggered run failed: %v", err)
-						}
-					}()
+					if runInFlight.CompareAndSwap(false, true) {
+						go func() {
+							defer runInFlight.Store(false)
+							if err := core.Run(ctx, d.cfg, d.db, "github_summary"); err != nil {
+								log.Printf("kai: poll-triggered run failed: %v", err)
+							}
+						}()
+					} else {
+						log.Printf("kai: %s active but run already in flight, skipping", s.repo)
+					}
 				} else {
 					states[i].nextPoll = now.Add(idlePollInterval)
 				}
