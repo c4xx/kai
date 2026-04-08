@@ -44,6 +44,18 @@ CREATE TABLE IF NOT EXISTS preferences (
   updated_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS standups (
+  standup_rowid  INTEGER PRIMARY KEY AUTOINCREMENT,
+  member         TEXT NOT NULL,
+  date           TEXT NOT NULL,
+  done           TEXT,
+  today          TEXT,
+  blocked        TEXT,
+  ts             INTEGER NOT NULL,
+  UNIQUE(member, date)
+);
+CREATE INDEX IF NOT EXISTS standups_date_member ON standups(date, member);
+
 CREATE INDEX IF NOT EXISTS idx_runs_ts        ON runs(ts);
 CREATE INDEX IF NOT EXISTS idx_actions_run_id ON actions(run_id);
 CREATE INDEX IF NOT EXISTS idx_actions_ts     ON actions(ts);
@@ -369,7 +381,102 @@ func (d *DB) SetPref(key, value string) error {
 	})
 }
 
-// --- Token budget ---
+// SearchSummaries performs FTS5 full-text search over run summaries.
+// Returns up to limit matching runs ordered by relevance.
+func (d *DB) SearchSummaries(query string, limit int) ([]*Run, error) {
+	rows, err := d.readDB.Query(`
+		SELECT r.run_rowid, r.id, r.job, r.ts, r.status, r.summary, r.tokens_used, r.active_days, r.briefing_opened
+		FROM runs_fts
+		JOIN runs r ON runs_fts.rowid = r.run_rowid
+		WHERE runs_fts MATCH ?
+		ORDER BY rank
+		LIMIT ?`, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var runs []*Run
+	for rows.Next() {
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, r)
+	}
+	return runs, rows.Err()
+}
+
+
+// --- Standup operations ---
+
+// Standup represents one member's daily standup record.
+type Standup struct {
+	Member  string
+	Date    string // YYYY-MM-DD
+	Done    string
+	Today   string
+	Blocked string
+	TS      int64
+}
+
+// InsertStandup upserts a standup record (ON CONFLICT REPLACE — last-write-wins per member+date).
+func (d *DB) InsertStandup(s *Standup) error {
+	return d.write(func(tx *sql.Tx) error {
+		_, err := tx.Exec(
+			`INSERT INTO standups (member, date, done, today, blocked, ts)
+			 VALUES (?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(member, date) DO UPDATE SET
+			   done=excluded.done, today=excluded.today,
+			   blocked=excluded.blocked, ts=excluded.ts`,
+			s.Member, s.Date, s.Done, s.Today, s.Blocked, s.TS,
+		)
+		return err
+	})
+}
+
+// StandupsForDate returns all standups for the given date (YYYY-MM-DD).
+// Returns an empty slice (not nil) when no standups exist for the date.
+func (d *DB) StandupsForDate(date string) ([]*Standup, error) {
+	rows, err := d.readDB.Query(
+		`SELECT member, date, COALESCE(done,''), COALESCE(today,''), COALESCE(blocked,''), ts FROM standups WHERE date = ? ORDER BY member`,
+		date,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []*Standup{}
+	for rows.Next() {
+		var s Standup
+		if err := rows.Scan(&s.Member, &s.Date, &s.Done, &s.Today, &s.Blocked, &s.TS); err != nil {
+			return nil, err
+		}
+		result = append(result, &s)
+	}
+	return result, rows.Err()
+}
+
+// MemberStandupHistory returns the last N days of standups for a member, most recent first.
+func (d *DB) MemberStandupHistory(member string, days int) ([]*Standup, error) {
+	rows, err := d.readDB.Query(
+		`SELECT member, date, COALESCE(done,''), COALESCE(today,''), COALESCE(blocked,''), ts FROM standups
+		 WHERE member = ? ORDER BY date DESC LIMIT ?`,
+		member, days,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []*Standup{}
+	for rows.Next() {
+		var s Standup
+		if err := rows.Scan(&s.Member, &s.Date, &s.Done, &s.Today, &s.Blocked, &s.TS); err != nil {
+			return nil, err
+		}
+		result = append(result, &s)
+	}
+	return result, rows.Err()
+}
 
 // TokensUsedToday returns total tokens_used from completed runs today (local time).
 func (d *DB) TokensUsedToday() (int64, error) {

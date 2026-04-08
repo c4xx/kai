@@ -3,10 +3,15 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
+	"log"
+	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,6 +23,7 @@ import (
 	"github.com/c4xx/kai/internal/memory"
 	"github.com/c4xx/kai/internal/safety"
 	"github.com/c4xx/kai/internal/scheduler"
+	"github.com/robfig/cron/v3"
 )
 
 func main() {
@@ -52,8 +58,12 @@ func main() {
 		runPending()
 	case "why":
 		runWhy(args)
+	case "replay":
+		runReplay(args)
+	case "standup":
+		runStandup(args)
 	case "version":
-		fmt.Println("kai v0.1.0")
+		fmt.Println("kai v0.3.0")
 	default:
 		fmt.Fprintf(os.Stderr, "kai: unknown command: %s\n", cmd)
 		printUsage()
@@ -78,6 +88,8 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  confirm <id> [--force]  Confirm a pending action")
 	fmt.Fprintln(os.Stderr, "  reject <id>  Reject a pending action")
 	fmt.Fprintln(os.Stderr, "  why <run-id> Show all actions for a run")
+	fmt.Fprintln(os.Stderr, "  replay <run-id>  Read-only simulation of a prior run")
+	fmt.Fprintln(os.Stderr, "  standup          Team standup management (submit/parse/serve)")
 }
 
 // mustLoadConfig loads config and exits on error.
@@ -227,9 +239,100 @@ data_dir = ""
 }
 
 func runInstall() {
-	fmt.Println("kai install — installing launchd service (macOS)")
-	// TODO: Week 3 — generate plist and install to ~/Library/LaunchAgents/
-	fmt.Println("Note: launchd integration coming in Week 3. For now, run `kai daemon` manually.")
+	cfg := mustLoadConfig()
+	exe, err := os.Executable()
+	if err != nil {
+		die("resolving executable path: %v", err)
+	}
+
+	switch runtime.GOOS {
+	case "darwin":
+		installLaunchd(cfg, exe)
+	case "linux":
+		installSystemd(cfg, exe)
+	default:
+		fmt.Fprintln(os.Stderr, "kai install: unsupported OS (macOS and Linux only)")
+		os.Exit(1)
+	}
+}
+
+func installLaunchd(cfg *config.Config, exe string) {
+	label := "com.kai.daemon"
+	plistPath := filepath.Join(os.Getenv("HOME"), "Library", "LaunchAgents", label+".plist")
+
+	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>%s</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>%s</string>
+		<string>daemon</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>%s/kai.log</string>
+	<key>StandardErrorPath</key>
+	<string>%s/kai.log</string>
+</dict>
+</plist>
+`, label, exe, cfg.DataDir, cfg.DataDir)
+
+	launchAgentsDir := filepath.Join(os.Getenv("HOME"), "Library", "LaunchAgents")
+	if err := os.MkdirAll(launchAgentsDir, 0755); err != nil {
+		die("creating LaunchAgents dir: %v", err)
+	}
+	if err := os.WriteFile(plistPath, []byte(plist), 0644); err != nil {
+		die("writing plist: %v", err)
+	}
+	fmt.Printf("Wrote %s\n", plistPath)
+
+	if err := exec.Command("launchctl", "load", plistPath).Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: launchctl load failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Run manually: launchctl load %s\n", plistPath)
+		return
+	}
+	fmt.Println("kai daemon installed and started. It will run on login.")
+}
+
+func installSystemd(cfg *config.Config, exe string) {
+	home := os.Getenv("HOME")
+	unitDir := filepath.Join(home, ".config", "systemd", "user")
+	unitPath := filepath.Join(unitDir, "kai.service")
+
+	unit := fmt.Sprintf(`[Unit]
+Description=kai developer companion daemon
+After=network.target
+
+[Service]
+ExecStart=%s daemon
+Restart=on-failure
+StandardOutput=append:%s/kai.log
+StandardError=append:%s/kai.log
+
+[Install]
+WantedBy=default.target
+`, exe, cfg.DataDir, cfg.DataDir)
+
+	if err := os.MkdirAll(unitDir, 0755); err != nil {
+		die("creating systemd user dir: %v", err)
+	}
+	if err := os.WriteFile(unitPath, []byte(unit), 0644); err != nil {
+		die("writing unit file: %v", err)
+	}
+	fmt.Printf("Wrote %s\n", unitPath)
+
+	if err := exec.Command("systemctl", "--user", "enable", "--now", "kai").Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: systemctl enable failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Run manually: systemctl --user enable --now kai\n")
+		return
+	}
+	fmt.Println("kai daemon enabled and started. It will run on login.")
 }
 
 func runJob(args []string) {
@@ -323,6 +426,13 @@ func runStatus() {
 		} else {
 			fmt.Printf("daemon: running (pid %d)\n", pid)
 		}
+	}
+
+	// Next scheduled run
+	sched, err := cron.ParseStandard(cfg.Schedule)
+	if err == nil {
+		next := sched.Next(time.Now())
+		fmt.Printf("next run: %s\n", next.Format("2006-01-02 15:04:05"))
 	}
 
 	// Token budget
@@ -614,4 +724,360 @@ func blastRadiusColor(br string) string {
 	default:
 		return ""
 	}
+}
+
+// --- Standup command ---
+
+func runStandup(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: kai standup <submit|parse|serve> [flags]")
+		os.Exit(1)
+	}
+	sub := args[0]
+	rest := args[1:]
+	switch sub {
+	case "submit":
+		runStandupSubmit(rest)
+	case "parse":
+		runStandupParse(rest)
+	case "serve":
+		runStandupServe(rest)
+	default:
+		fmt.Fprintf(os.Stderr, "kai standup: unknown subcommand: %s\n", sub)
+		fmt.Fprintln(os.Stderr, "Usage: kai standup <submit|parse|serve>")
+		os.Exit(1)
+	}
+}
+
+func runStandupSubmit(args []string) {
+	var member, done, today, blocked, dateStr string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--member":
+			if i+1 < len(args) {
+				member = args[i+1]
+				i++
+			}
+		case "--done":
+			if i+1 < len(args) {
+				done = args[i+1]
+				i++
+			}
+		case "--today":
+			if i+1 < len(args) {
+				today = args[i+1]
+				i++
+			}
+		case "--blocked":
+			if i+1 < len(args) {
+				blocked = args[i+1]
+				i++
+			}
+		case "--date":
+			if i+1 < len(args) {
+				dateStr = args[i+1]
+				i++
+			}
+		}
+	}
+
+	if member == "" {
+		die("--member is required")
+	}
+
+	// Validate and truncate fields to 500 chars.
+	done = truncate(done, 500)
+	today = truncate(today, 500)
+	blocked = truncate(blocked, 500)
+
+	// Resolve and validate date.
+	date, err := validateStandupDate(dateStr)
+	if err != nil {
+		die("%v", err)
+	}
+
+	cfg := mustLoadConfig()
+	db := mustOpenDB(cfg)
+	defer db.Close()
+
+	if !isMemberListed(cfg, member) {
+		log.Printf("WARNING: standup submitted for unlisted member %q", member)
+	}
+
+	s := &memory.Standup{
+		Member:  member,
+		Date:    date,
+		Done:    done,
+		Today:   today,
+		Blocked: blocked,
+		TS:      time.Now().Unix(),
+	}
+	if err := db.InsertStandup(s); err != nil {
+		die("inserting standup: %v", err)
+	}
+	fmt.Printf("Standup recorded for %s on %s.\n", member, date)
+}
+
+func runStandupParse(args []string) {
+	var member, dateStr string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--member":
+			if i+1 < len(args) {
+				member = args[i+1]
+				i++
+			}
+		case "--date":
+			if i+1 < len(args) {
+				dateStr = args[i+1]
+				i++
+			}
+		}
+	}
+
+	if member == "" {
+		die("--member is required")
+	}
+
+	date, err := validateStandupDate(dateStr)
+	if err != nil {
+		die("%v", err)
+	}
+
+	var done, today, blocked string
+	scanner := bufio.NewScanner(os.Stdin)
+	lineNum := 0
+	for scanner.Scan() {
+		lineNum++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		field, value, ok := parseStandupLine(line)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "kai standup parse: unrecognized line %d: %q\n", lineNum, line)
+			os.Exit(1)
+		}
+		switch field {
+		case "done":
+			done = truncate(value, 500)
+		case "today":
+			today = truncate(value, 500)
+		case "blocked":
+			blocked = truncate(value, 500)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		die("reading stdin: %v", err)
+	}
+
+	cfg := mustLoadConfig()
+	db := mustOpenDB(cfg)
+	defer db.Close()
+
+	if !isMemberListed(cfg, member) {
+		log.Printf("WARNING: standup submitted for unlisted member %q", member)
+	}
+
+	s := &memory.Standup{
+		Member:  member,
+		Date:    date,
+		Done:    done,
+		Today:   today,
+		Blocked: blocked,
+		TS:      time.Now().Unix(),
+	}
+	if err := db.InsertStandup(s); err != nil {
+		die("inserting standup: %v", err)
+	}
+	fmt.Printf("Standup recorded for %s on %s.\n", member, date)
+}
+
+func runStandupServe(args []string) {
+	cfg := mustLoadConfig()
+	db := mustOpenDB(cfg)
+	defer db.Close()
+
+	port := cfg.Team.ServePort
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--port" && i+1 < len(args) {
+			if p, err := strconv.Atoi(args[i+1]); err == nil {
+				port = p
+			}
+			i++
+		}
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/standup", standupHandler(cfg, db))
+
+	// Outermost panic recovery middleware.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("kai standup serve: panic: %v", rec)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				fmt.Fprint(w, `{"error":"internal server error"}`)
+			}
+		}()
+		mux.ServeHTTP(w, r)
+	})
+
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	go func() {
+		<-ctx.Done()
+		srv.Shutdown(context.Background()) //nolint
+	}()
+
+	fmt.Printf("kai standup serving on :%d\n", port)
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if strings.Contains(err.Error(), "address already in use") {
+			fmt.Fprintf(os.Stderr, "Port %d already in use. Use --port to change.\n", port)
+			os.Exit(1)
+		}
+		die("standup serve: %v", err)
+	}
+}
+
+// standupPostBody is the JSON body for POST /standup.
+type standupPostBody struct {
+	Member  string `json:"member"`
+	Done    string `json:"done"`
+	Today   string `json:"today"`
+	Blocked string `json:"blocked"`
+}
+
+func standupHandler(cfg *config.Config, db *memory.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			fmt.Fprintf(w, `{"error":"method not allowed"}`)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 8192)
+
+		var body standupPostBody
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `{"error":"invalid JSON"}`)
+			return
+		}
+		if body.Member == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `{"error":"member required"}`)
+			return
+		}
+
+		if !isMemberListed(cfg, body.Member) {
+			log.Printf("WARNING: standup submitted for unlisted member %q", body.Member)
+		}
+
+		date := time.Now().Format("2006-01-02")
+		s := &memory.Standup{
+			Member:  body.Member,
+			Date:    date,
+			Done:    truncate(body.Done, 500),
+			Today:   truncate(body.Today, 500),
+			Blocked: truncate(body.Blocked, 500),
+			TS:      time.Now().Unix(),
+		}
+		if err := db.InsertStandup(s); err != nil {
+			log.Printf("kai standup serve: db error: %v", err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprintf(w, `{"error":"database error"}`)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"status":"ok","member":%q,"date":%q}`, body.Member, date)
+	}
+}
+
+// parseStandupLine parses a fixed-format standup line.
+// Accepts: "昨日/done: <text>", "今日/today: <text>", "卡点/blocked: <text>"
+// Returns (field, value, ok).
+func parseStandupLine(line string) (field, value string, ok bool) {
+	prefixes := map[string]string{
+		"昨日:":      "done",
+		"done:":    "done",
+		"今日:":      "today",
+		"today:":   "today",
+		"卡点:":      "blocked",
+		"blocked:": "blocked",
+	}
+	lower := strings.ToLower(line)
+	for prefix, f := range prefixes {
+		if strings.HasPrefix(lower, prefix) {
+			return f, strings.TrimSpace(line[len(prefix):]), true
+		}
+	}
+	return "", "", false
+}
+
+// validateStandupDate parses and validates a date string (YYYY-MM-DD).
+// If empty, returns today. Rejects future dates and warns if >7 days ago.
+func validateStandupDate(s string) (string, error) {
+	if s == "" {
+		return time.Now().Format("2006-01-02"), nil
+	}
+	t, err := time.ParseInLocation("2006-01-02", s, time.Local)
+	if err != nil {
+		return "", fmt.Errorf("invalid date %q: must be YYYY-MM-DD", s)
+	}
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
+	if t.After(today) {
+		return "", fmt.Errorf("date %s is in the future", s)
+	}
+	if today.Sub(t) > 7*24*time.Hour {
+		fmt.Fprintf(os.Stderr, "Warning: date %s is more than 7 days ago.\n", s)
+	}
+	return s, nil
+}
+
+// isMemberListed returns true if member is in cfg.Team.Members.
+func isMemberListed(cfg *config.Config, member string) bool {
+	for _, m := range cfg.Team.Members {
+		if m == member {
+			return true
+		}
+	}
+	return false
+}
+
+func runReplay(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: kai replay <run-id>")
+		os.Exit(1)
+	}
+	runID := args[0]
+
+	cfg := mustLoadConfig()
+	db := mustOpenDB(cfg)
+	defer db.Close()
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	result, err := core.Replay(ctx, cfg, db, runID)
+	if err != nil {
+		die("replay failed: %v", err)
+	}
+	fmt.Println(result)
 }

@@ -25,7 +25,7 @@ func (m *mockTool) Execute(_ context.Context, _ json.RawMessage) (string, error)
 
 func TestNewBetaRunner(t *testing.T) {
 	// Just verify construction doesn't panic.
-	runner := NewBetaRunner("sk-ant-test", anthropic.ModelClaude3_5HaikuLatest, 1024)
+	runner := NewBetaRunner("sk-ant-test", anthropic.ModelClaude3_5HaikuLatest, 1024, 0)
 	if runner == nil {
 		t.Fatal("expected non-nil runner")
 	}

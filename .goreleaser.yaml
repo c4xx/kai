@@ -26,9 +26,25 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+brews:
+  - name: kai
+    repository:
+      owner: c4xx
+      name: homebrew-kai
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/c4xx/kai"
+    description: "An always-on developer companion: morning GitHub briefings with cross-run memory."
+    license: "MIT"
+    test: |
+      system "#{bin}/kai", "version"
+    install: |
+      bin.install "kai"
+
 changelog:
   sort: asc
   filters:
     exclude:
       - "^chore:"
       - "^docs:"
+
